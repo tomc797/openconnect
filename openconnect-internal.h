@@ -451,6 +451,10 @@ struct openconnect_info {
 	int no_http_keepalive;
 	int dump_http_traffic;
 
+	char *cert2;
+	char *key2;
+	char *key2_password;
+
 	int token_mode;
 	int token_bypassed;
 	int token_tries;
@@ -743,6 +747,30 @@ struct openconnect_info {
 		(_v)->progress((_v)->cbdata, lvl, __VA_ARGS__);	\
 	} while(0)
 #define vpn_perror(vpninfo, msg) vpn_progress((vpninfo), PRG_ERR, "%s: %s\n", (msg), strerror(errno))
+
+/* certificate authentication */
+typedef enum {
+	CERT_AUTH_REQ_CERT1 = (1U<<0),
+#define CERT_AUTH_REQ_CERT1 CERT_AUTH_REQ_CERT1
+	CERT_AUTH_REQ_CERT2 = (1U<<1),
+#define CERT_AUTH_CERT2 CERT_AUTH_REQ_CERT2,
+	CERT_AUTH_CHAL_SHA256 = (1U<<8),
+#define CERT_AUTH_CHAL_SHA256 CERT_AUTH_CHAL_SHA256
+	CERT_AUTH_CHAL_SHA384 = (1U<<9),
+#define CERT_AUTH_CHAL_SHA384 CERT_AUTH_CHAL_SHA384
+	CERT_AUTH_CHAL_SHA512 = (1U<<10),
+#define CERT_AUTH_CHAL_SHA512 CERT_AUTH_CHAL_SHA512
+} cert_auth_t;
+#define CERT_AUTH_CHAL_MASK (CERT_AUTH_CHAL_SHA256|CERT_AUTH_CHAL_SHA384|CERT_AUTH_CHAL_SHA512)
+
+struct challenge_response {
+	int type;
+	char *data;
+};
+
+int cert_auth_challenge_response(struct openconnect_info *vpninfo,
+		int cert_rq, const char *challenge, char **identity,
+		struct challenge_response *response);
 
 /****************************************************************************/
 /* Oh Solaris how we hate thee! */
