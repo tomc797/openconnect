@@ -1210,8 +1210,11 @@ static int load_keycert(struct openconnect_info *vpninfo,
 	if (cert_path == NULL || cert_path[0] == 0)
 		return -EINVAL;
 
-	if (key_path == NULL)
+	if (key_path == NULL || key_path[0] == 0)
 		key_path = cert_path;
+
+	if (key_ == NULL || chain_ == NULL || chain_len_ == NULL)
+		return -EINVAL;
 
 	/* hush not used warnings */
 	(void) pin_callback;
@@ -1856,7 +1859,8 @@ static int load_keycert(struct openconnect_info *vpninfo,
 	*key_ = pkey, pkey = NULL;
 	*chain_ = supporting_certs, supporting_certs = NULL;
 	*chain_len_ = nr_supporting_certs, nr_supporting_certs = 0;
-	*crl_ = crl, crl = NULL;
+	if (crl_)
+		*crl_ = crl, crl = NULL;
 	ret = 0;
 
  out:
