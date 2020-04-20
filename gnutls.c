@@ -40,7 +40,11 @@
 #endif
 
 #if defined(HAVE_P11KIT) || defined(HAVE_GNUTLS_SYSTEM_KEYS)
-static int pin_callback(void *user, int attempt, const char *token_uri,
+static int pin1_callback(void *user, int attempt, const char *token_uri,
+			       const char *token_label, unsigned int flags,
+			       char *pin, size_t pin_max);
+
+static int pin2_callback(void *user, int attempt, const char *token_uri,
 			       const char *token_label, unsigned int flags,
 			       char *pin, size_t pin_max);
 #endif /* HAVE_P11KIT || HAVE_GNUTLS_SYSTEM_KEYS */
@@ -1177,6 +1181,7 @@ static void check_tls13_capable(struct openconnect_info *vpninfo,
 
 static int load_keycert(struct openconnect_info *vpninfo,
 		const char *key_path, const char *cert_path, const char *password,
+		gnutls_pin_callback_t pin_callback,
 		gnutls_privkey_t *key_,
 		gnutls_x509_crt_t **chain_, unsigned int *chain_len_,
 		gnutls_x509_crl_t *crl_)
@@ -1207,6 +1212,9 @@ static int load_keycert(struct openconnect_info *vpninfo,
 
 	if (key_path == NULL)
 		key_path = cert_path;
+
+	/* hush not used warnings */
+	(void) pin_callback;
 
 	cert_url = (char *)cert_path;
 	key_url = (char *)key_path;
@@ -1884,11 +1892,16 @@ static int load_certificate(struct openconnect_info *vpninfo)
 	gnutls_x509_crt_t *chain = NULL;
 	unsigned int chain_len = 0;
 	gnutls_x509_crl_t crl = NULL;
+	gnutls_pin_callback_t pin_callback = NULL;
 	unsigned int i;
 	int ret;
 
+#if defined(HAVE_P11KIT) || defined(HAVE_GNUTLS_SYSTEM_KEYS)
+	pin_callback = pin1_callback;
+#endif
 	ret = load_keycert(vpninfo, vpninfo->sslkey, vpninfo->cert,
-			vpninfo->cert_password, &key, &chain, &chain_len, &crl);
+			vpninfo->cert_password, pin_callback,
+			&key, &chain, &chain_len, &crl);
 	if (ret < 0)
 		goto cleanup;
 
@@ -2089,6 +2102,15 @@ int cert_auth_challenge_response(struct openconnect_info *vpninfo,
 		int cert_rq, const char *challenge, char **identity,
 		struct challenge_response *response)
 {
+	static const struct {
+		int chal;
+		gnutls_digest_algorithm_t digest;
+	} *entry, table[] = {
+		{CERT_AUTH_CHAL_SHA512, GNUTLS_DIG_SHA512},
+		{CERT_AUTH_CHAL_SHA384, GNUTLS_DIG_SHA384},
+		{CERT_AUTH_CHAL_SHA256, GNUTLS_DIG_SHA256},
+		{0},
+	};
 	gnutls_privkey_t key = NULL;
 	gnutls_x509_crt_t *chain = NULL;
 	unsigned int chain_len = 0;
@@ -2097,16 +2119,19 @@ int cert_auth_challenge_response(struct openconnect_info *vpninfo,
 	gnutls_datum_t p7bin, p7pem = {NULL, 0};
 	const gnutls_datum_t dat = {(void *)challenge, strlen(challenge)};
 	gnutls_datum_t sig, sigpem = {NULL, 0};
-	gnutls_digest_algorithm_t digest;
+	gnutls_pin_callback_t pin_callback = NULL;
 	unsigned int i;
-	int pk, type;
-	int ret, gerr = 0;
+	int pk, ret, gerr = 0;
 
 	if (response == NULL)
 		return -EINVAL;
 
+#if defined(HAVE_P11KIT) || defined(HAVE_GNUTLS_SYSTEM_KEYS)
+	pin_callback = pin2_callback;
+#endif
 	ret = load_keycert(vpninfo, vpninfo->key2, vpninfo->cert2,
-			vpninfo->key2_password, &key, &chain, &chain_len, &crl);
+			vpninfo->key2_password, pin_callback, &key,
+			&chain, &chain_len, &crl);
 	if (ret < 0)
 		goto cleanup;
 
@@ -2114,14 +2139,19 @@ int cert_auth_challenge_response(struct openconnect_info *vpninfo,
 
 	/* Export identity as PKCS7 */
 	gerr = gnutls_pkcs7_init(&p7);
+	if (gerr < 0)
+		goto cleanup;
+
 	for (i = 0; i < chain_len; i++) {
 		gerr = gnutls_pkcs7_set_crt(p7, chain[i]);
 		if (gerr < 0)
 			goto cleanup;
 	}
+
 	gerr = gnutls_pkcs7_export2(p7, GNUTLS_X509_FMT_DER, &p7bin);
 	if (gerr < 0)
 		goto cleanup;
+
 	gnutls_pkcs7_deinit(p7), p7 = NULL;
 	/* export as PEM */
 	gerr = pem_encode(&p7bin, &p7pem);
@@ -2134,29 +2164,22 @@ int cert_auth_challenge_response(struct openconnect_info *vpninfo,
 	 * Anyconnect prefers SHA512
 	 */
 	pk = gnutls_privkey_get_pk_algorithm(key, NULL);
-	if ((cert_rq & CERT_AUTH_CHAL_SHA512)
-		&& gnutls_pk_to_sign(pk, GNUTLS_DIG_SHA512) != GNUTLS_SIGN_UNKNOWN) {
-		digest = GNUTLS_DIG_SHA512;
-		type = CERT_AUTH_CHAL_SHA512;
-	} else if ((cert_rq & CERT_AUTH_CHAL_SHA384)
-		&& gnutls_pk_to_sign(pk, GNUTLS_DIG_SHA384) != GNUTLS_SIGN_UNKNOWN) {
-		digest = GNUTLS_DIG_SHA384;
-		type = CERT_AUTH_CHAL_SHA384;
-	} else if ((cert_rq & CERT_AUTH_CHAL_SHA256)
-		&& gnutls_pk_to_sign(pk, GNUTLS_DIG_SHA256) != GNUTLS_SIGN_UNKNOWN) {
-		digest = GNUTLS_DIG_SHA256;
-		type = CERT_AUTH_CHAL_SHA256;
-	} else {
+	for (entry = table; entry->chal != 0; entry++) {
+		if ((cert_rq & entry->chal)
+			&& gnutls_pk_to_sign(pk, entry->digest) != GNUTLS_SIGN_UNKNOWN)
+			break;
+	}
+	if (entry->chal == 0) {
 		vpn_progress(vpninfo, PRG_ERR,
-		    _("Unsupported algorithms 0x%.4x\n"),
-		    (cert_rq & CERT_AUTH_CHAL_MASK));
+		    _("I don't share an algorithm to sign challenge!\n"));
 		ret = -EINVAL;
 		goto cleanup;
 	}
 
-	gerr = gnutls_privkey_sign_data(key, digest, 0, &dat, &sig);
+	gerr = gnutls_privkey_sign_data(key, entry->digest, 0, &dat, &sig);
 	if (gerr < 0)
 		goto cleanup;
+
 	gerr = pem_encode(&sig, &sigpem);
 	free_datum(&sig);
 	if (gerr < 0)
@@ -2166,25 +2189,25 @@ int cert_auth_challenge_response(struct openconnect_info *vpninfo,
 	*identity = (char *)p7pem.data;
 	p7pem = (gnutls_datum_t) {0};
 	*response =
-	  (struct challenge_response) {type, (char *)sigpem.data};
+	  (struct challenge_response) {entry->chal, (char *)sigpem.data};
 	sigpem = (gnutls_datum_t) {0};
 	ret = 0;
 
  cleanup:
 	if (gerr < 0) {
 		vpn_progress(vpninfo, PRG_ERR,
-		    _("challenge_response: (%d) %s\n"),
+		    _("Failed authoring challenge response: (%d) %s\n"),
 		    gerr, gnutls_strerror(gerr));
 		ret = -ENOMEM;
 	}
+	free_datum(&sigpem);
+	free_datum(&p7pem);
+	gnutls_pkcs7_deinit(p7);
 	gnutls_privkey_deinit(key);
 	for (i = 0; i < chain_len; i++)
 		gnutls_x509_crt_deinit(chain[i]);
 	gnutls_free(chain);
 	gnutls_x509_crl_deinit(crl);
-	gnutls_pkcs7_deinit(p7);
-	free_datum(&p7pem);
-	free_datum(&sigpem);
 	return ret;
 }
 
@@ -2817,17 +2840,14 @@ static int request_pin(struct openconnect_info *vpninfo, char **ppin,
 	return 0;
 }
 
-int pin_callback(void *user, int attempts, const char *token_uri,
-			       const char *token_label, unsigned int flags,
-			       char *pin, size_t pin_max)
+static int pin_callback(struct openconnect_info *vpninfo,
+	const char *first_pass, int attempts,
+	const char *token_uri, const char *token_label,
+	unsigned int flags, char *pin, size_t pin_max)
 {
-	struct openconnect_info *vpninfo = user;
 	struct pin_cache *cache;
 	size_t pinlen;
 	int ret;
-
-	if (!vpninfo)
-		return GNUTLS_E_INVALID_REQUEST;
 
 	if (token_uri == NULL || token_uri[0] == 0)
 		token_uri = "(no URI)";
@@ -2848,15 +2868,17 @@ int pin_callback(void *user, int attempts, const char *token_uri,
 		if (cache == NULL)
 			return GNUTLS_E_MEMORY_ERROR;
 		*cache =
-			(struct pin_cache) { .pin = vpninfo->cert_password,
+			(struct pin_cache) { .pin = first_pass ? strdup(first_pass) : NULL,
 			  .token = strdup(token_uri),
 			  .next = vpninfo->pin_cache };
-		if (cache->token == NULL) {
+		if ((first_pass && cache->pin == NULL)
+		    || cache->token == NULL) {
+			free_pass(&cache->pin);
+			free(cache->token);
 			free(cache);
 			return GNUTLS_E_MEMORY_ERROR;
 		}
 		vpninfo->pin_cache = cache;
-		vpninfo->cert_password = NULL;
 	}
 
 	/**
@@ -2898,6 +2920,37 @@ int pin_callback(void *user, int attempts, const char *token_uri,
 			vpn_progress(vpninfo, PRG_ERR, _("No PIN provided\n"));
 		return GNUTLS_E_PKCS11_PIN_ERROR;
 	}
+}
+
+int pin1_callback(void *user, int attempts,
+	const char *token_uri, const char *token_label,
+	unsigned int flags, char *pin, size_t pin_max)
+{
+	struct openconnect_info *vpninfo = user;
+	int ret;
+
+	if (!vpninfo)
+		return GNUTLS_E_INVALID_REQUEST;
+	ret = pin_callback(vpninfo, vpninfo->cert_password, attempts,
+		token_uri, token_label, flags, pin, pin_max);
+	vpninfo->cert_password = 0;
+	return ret;
+}
+
+int pin2_callback(void *user, int attempts,
+	const char *token_uri, const char *token_label,
+	unsigned int flags, char *pin, size_t pin_max)
+{
+	struct openconnect_info *vpninfo = user;
+	int ret;
+
+
+	if (!vpninfo)
+		return GNUTLS_E_INVALID_REQUEST;
+	ret = pin_callback(vpninfo, vpninfo->key2_password, attempts,
+		token_uri, token_label, flags, pin, pin_max);
+	vpninfo->key2_password = 0;
+	return ret;
 }
 #endif /* HAVE_P11KIT || HAVE_GNUTLS_SYSTEM_KEYS */
 
