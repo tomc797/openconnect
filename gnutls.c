@@ -1563,7 +1563,7 @@ static int load_keycert(struct openconnect_info *vpninfo,
 			     _("This version of OpenConnect was built without TPM support\n"));
 		return -EINVAL;
 #else
-		ret = load_tpm1_key(vpninfo, &fdata, &pkey, &sig);
+		ret = load_tpm1_key(vpninfo, &fdata, password, &pkey, &sig);
 		if (ret)
 			goto out;
 

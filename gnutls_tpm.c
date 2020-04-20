@@ -86,6 +86,7 @@ static int tpm_sign_fn(gnutls_privkey_t key, void *_vpninfo,
 }
 
 int load_tpm1_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
+		  const char *password,
 		  gnutls_privkey_t *pkey, gnutls_datum_t *pkey_sig)
 {
 	static const TSS_UUID SRK_UUID = TSS_UUID_SRK;
@@ -163,8 +164,12 @@ int load_tpm1_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
 		goto out_srk;
 	}
 
-	pass = vpninfo->cert_password;
-	vpninfo->cert_password = NULL;
+	pass = NULL;
+	if (password != NULL && (pass = strdup(password)) == NULL) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("Out of memory.\n"));
+		goto out_srk;
+	}
 	while (1) {
 		static const char nullpass[20];
 
@@ -177,14 +182,15 @@ int load_tpm1_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
 			err = Tspi_Policy_SetSecret(vpninfo->tpm1->srk_policy,
 						    TSS_SECRET_MODE_SHA1,
 						    sizeof(nullpass), (BYTE *)nullpass);
+
+		free_pass(&pass);
+
 		if (err) {
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Failed to set TPM PIN: %s\n"),
 				     Trspi_Error_String(err));
 			goto out_srkpol;
 		}
-
-		free_pass(&pass);
 
 		/* ... we get it here instead. */
 		err = Tspi_Context_LoadKeyByBlob(vpninfo->tpm1->tpm_context, vpninfo->tpm1->srk,
@@ -193,7 +199,7 @@ int load_tpm1_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
 		if (!err)
 			break;
 
-		if (pass)
+		if (password)
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Failed to load TPM key blob: %s\n"),
 				     Trspi_Error_String(err));
