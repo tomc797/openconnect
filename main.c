@@ -1256,7 +1256,9 @@ static int autocomplete(int argc, char **argv)
 			switch (opt) {
 			case 'k': /* --sslkey */
 			case 'c': /* --certificate */
-				if (!strncmp(comp_opt + prefixlen, "pkcs11:", 7)) {
+			case OPT_MULTICERT_KEY2: /* --key2 */
+			case OPT_MULTICERT_CERT2: /* --cert2 */
+				if (!strncmp(comp_opt, "pkcs11:", 7)) {
 					/* We could do clever things here... */
 					return 0; /* .. but we don't. */
 				}
@@ -1361,6 +1363,7 @@ static int autocomplete(int argc, char **argv)
 			case 'm': /* --mtu */
 			case OPT_BASEMTU: /* --base-mtu */
 			case 'p': /* --key-password */
+			case OPT_MULTICERT_KEY2_PASSWORD: /* --key2-password */
 			case 'P': /* --proxy */
 			case 'u': /* --user */
 			case 'Q': /* --queue-len */
